@@ -78,15 +78,20 @@ horas="$(python3 scripts/git_hours.py "$REPO_DIR")"
 # 5) Commits totales
 commits="$(git -C "$REPO_DIR" rev-list --all --count)"
 
+# Desactivar pipefail solo para los pipes con head/sort (evita SIGPIPE -> 141)
+set +o pipefail
+
 # 6) Autores únicos (por email)
 personas="$(git -C "$REPO_DIR" log --all --format='%ae' | sort -u | wc -l | tr -d ' ')"
 
 # 7) Primer y último commit (YYYY-MM-DD)
+ultimo_commit="$(git -C "$REPO_DIR" log --all -n 1 --format='%ai' | cut -d' ' -f1)"
 primer_commit="$(git -C "$REPO_DIR" log --all --reverse --format='%ai' | head -1 | cut -d' ' -f1)"
-ultimo_commit="$(git -C "$REPO_DIR" log --all --format='%ai' | head -1 | cut -d' ' -f1)"
 
-# Contribuyentes: emails únicos (puedes cambiar a %an si prefieres)
+# Contribuyentes: emails únicos
 contribuyentes="$(git -C "$REPO_DIR" log --all --format='%ae' | sort -u | jq -R -s -c 'split("\n") | map(select(length>0))')"
+
+set -o pipefail
 
 # Devolver JSON (sin los campos no/proyecto/repo/lenguajes: esos los agrega el workflow)
 jq -n -c \
