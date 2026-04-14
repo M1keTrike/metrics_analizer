@@ -46,12 +46,15 @@ ios_count="$(find "$REPO_DIR" -type f \( -name '*.storyboard' -o -name '*.xib' \
 # D) XAML / Qt / JavaFX
 ui_markup_count="$(find "$REPO_DIR" -type f \( -name '*.xaml' -o -name '*.ui' -o -name '*.fxml' \) -not -path '*/.git/*' 2>/dev/null | wc -l | tr -d ' ')"
 
+# Desactivamos pipefail para los bloques con grep (grep sale 1 si no hay match -> xargs 123)
+set +o pipefail
+
 # E) Flutter: Dart widgets que terminan en Page/Screen y extienden StatelessWidget/StatefulWidget
 flutter_count="$(
   find "$REPO_DIR" -type f -name '*.dart' \
     -not -path '*/.dart_tool/*' -not -path '*/build/*' -not -path '*/.git/*' \
     -print0 2>/dev/null \
-  | xargs -0 -r grep -nE 'class[[:space:]]+[A-Za-z0-9_]+(Page|Screen)[[:space:]]+extends[[:space:]]+(StatelessWidget|StatefulWidget)' \
+  | xargs -0 -r grep -nE 'class[[:space:]]+[A-Za-z0-9_]+(Page|Screen)[[:space:]]+extends[[:space:]]+(StatelessWidget|StatefulWidget)' 2>/dev/null \
   | cut -d: -f1 \
   | sort -u \
   | wc -l \
@@ -63,12 +66,14 @@ android_code_count="$(
   find "$REPO_DIR" -type f \( -name '*.kt' -o -name '*.java' \) \
     -not -path '*/build/*' -not -path '*/.git/*' \
     -print0 2>/dev/null \
-  | xargs -0 -r grep -nE 'class[[:space:]]+[A-Za-z0-9_]+[[:space:]]*:[[:space:]]*.*\b(Activity|Fragment)\b|class[[:space:]]+[A-Za-z0-9_]+[[:space:]]+extends[[:space:]]+.*\b(Activity|Fragment)\b' \
+  | xargs -0 -r grep -nE 'class[[:space:]]+[A-Za-z0-9_]+[[:space:]]*:[[:space:]]*.*\b(Activity|Fragment)\b|class[[:space:]]+[A-Za-z0-9_]+[[:space:]]+extends[[:space:]]+.*\b(Activity|Fragment)\b' 2>/dev/null \
   | cut -d: -f1 \
   | sort -u \
   | wc -l \
   | tr -d ' '
 )"
+
+set -o pipefail
 
 pantallas=$((fe_count + android_xml_count + ios_count + ui_markup_count + flutter_count + android_code_count))
 
