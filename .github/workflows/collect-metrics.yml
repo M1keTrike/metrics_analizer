@@ -1,0 +1,146 @@
+name: Collect production metrics
+
+on:
+  workflow_dispatch:
+    inputs:
+      repos_json:
+        description: "JSON con la lista de repos a analizar (array de objetos: owner, repo, nombre)"
+        required: true
+        type: string
+        default: |
+          [
+            {"owner": "M1keTrike", "repo": "Voltio_CHMMA_microservices", "nombre": "Voltio CHMMA"},
+            {"owner": "M1keTrike", "repo": "AccesGate_CHM-M", "nombre": "AccesGate"}
+          ]
+
+permissions:
+  contents: read
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout (este repo)
+        uses: actions/checkout@v4
+
+      - name: Instalar dependencias (cloc, jq)
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cloc jq python3
+
+      - name: Validar input JSON
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '${{ inputs.repos_json }}' | jq -e '
+            type=="array" and
+            all(.[]; has("owner") and has("repo") and has("nombre"))
+          ' > /dev/null
+
+      - name: Calcular métricas y generar metricas.json
+        env:
+          REPOS_JSON: ${{ inputs.repos_json }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          METRICS_PAT: ${{ secrets.METRICS_PAT }}
+          GITHUB_API_URL: ${{ github.api_url }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Elegir token: PAT si existe, si no usar GITHUB_TOKEN
+          if [[ -n "${METRICS_PAT:-}" ]]; then
+            AUTH_TOKEN="$METRICS_PAT"
+          else
+            AUTH_TOKEN="$GITHUB_TOKEN"
+          fi
+
+          WORKDIR="$RUNNER_TEMP/metrics"
+          rm -rf "$WORKDIR"
+          mkdir -p "$WORKDIR"
+
+          results='[]'
+          count="$(echo "$REPOS_JSON" | jq 'length')"
+          echo "Analizando $count repos..."
+
+          for i in $(seq 0 $((count-1))); do
+            owner="$(echo "$REPOS_JSON" | jq -r ".[$i].owner")"
+            repo="$(echo "$REPOS_JSON" | jq -r ".[$i].repo")"
+            nombre="$(echo "$REPOS_JSON" | jq -r ".[$i].nombre")"
+            full="$owner/$repo"
+            no=$((i+1))
+
+            echo "==> [$no/$count] $full ($nombre)"
+
+            mirror_dir="$WORKDIR/${owner}__${repo}.mirror"
+            worktree_dir="$WORKDIR/${owner}__${repo}.work"
+            rm -rf "$mirror_dir" "$worktree_dir"
+
+            # 1) Clonar con historial completo (mirror)
+            git -c http.extraheader="AUTHORIZATION: bearer $AUTH_TOKEN" \
+              clone --mirror "https://github.com/$full.git" "$mirror_dir"
+
+            # 1) Clonar normal para tener archivos (usa el mirror como referencia si es posible)
+            git -c http.extraheader="AUTHORIZATION: bearer $AUTH_TOKEN" \
+              clone --reference-if-able "$mirror_dir" "https://github.com/$full.git" "$worktree_dir"
+
+            # 2-7) Métricas locales (LOC, pantallas, horas, commits, autores, fechas, contribuyentes)
+            metrics_json="$(bash scripts/calculate_metrics.sh "$worktree_dir")"
+
+            # 8) Lenguajes desde la API (bytes -> porcentajes)
+            lang_bytes="$(curl -fsSL \
+              -H "Authorization: Bearer $AUTH_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "$GITHUB_API_URL/repos/$owner/$repo/languages" \
+              | jq -c '.')"
+
+            total_bytes="$(echo "$lang_bytes" | jq '[.[]] | add // 0')"
+            if [[ "$total_bytes" -gt 0 ]]; then
+              lang_pct="$(echo "$lang_bytes" | jq -c --argjson total "$total_bytes" '
+                to_entries
+                | map({(.key): ((.value / $total) * 100)})
+                | add
+              ')"
+            else
+              lang_pct='{}'
+            fi
+
+            # Estructura final requerida
+            row="$(jq -c \
+              --argjson no "$no" \
+              --arg proyecto "$nombre" \
+              --arg repo "$full" \
+              --argjson lenguajes "$lang_pct" \
+              '. + {no: $no, proyecto: $proyecto, repo: $repo, lenguajes: $lenguajes}' \
+              <<<"$metrics_json"
+            )"
+
+            results="$(jq -c --argjson row "$row" '. + [$row]' <<<"$results")"
+          done
+
+          echo "$results" | jq '.' > metricas.json
+
+          # Job summary (tabla Markdown)
+          {
+            echo "# Métricas de producción"
+            echo
+            echo "Generado (UTC): $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo
+            echo "| # | Proyecto | Repo | LOC (code) | Pantallas | Horas | Personas | Commits | Primer commit | Último commit |"
+            echo "|---:|---|---|---:|---:|---:|---:|---:|---|---|"
+            echo "$results" | jq -r '.[] |
+              "| \(.no) | \(.proyecto) | \(.repo) | \(.loc) | \(.pantallas) | \(.horas) | \(.personas) | \(.commits) | \(.primer_commit) | \(.ultimo_commit) |"
+            '
+            echo
+            echo "Artifact: metricas.json"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir artifact (metricas.json)
+        uses: actions/upload-artifact@v4
+        with:
+          name: metricas
+          path: metricas.json
+          if-no-files-found: error
+          retention-days: 30
